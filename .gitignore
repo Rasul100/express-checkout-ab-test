@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.ipynb_checkpoints/
+.streamlit/secrets.toml
+data/*.csv
+data/*.sqlite
+data/*.parquet
+!data/.gitkeep
