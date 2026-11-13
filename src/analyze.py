@@ -10,6 +10,7 @@ from scipy import stats
 from statsmodels.stats.proportion import proportion_confint, proportions_ztest
 from statsmodels.stats.power import NormalIndPower
 from statsmodels.stats.proportion import proportion_effectsize
+from statsmodels.stats.multitest import multipletests
 
 ROOT = Path(__file__).resolve().parents[1]
 DB = ROOT / "data" / "experiment.sqlite"
@@ -125,4 +126,79 @@ def segments(df: pd.DataFrame, col: str) -> pd.DataFrame:
         res["segment"] = col
         res["value"] = key
         rows.append(res)
+    return pd.DataFrame(rows)
+
+
+def segments_holm(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """All pre-registered segment tests as one family, Holm-adjusted.
+
+    Five slices (3 devices + 2 user types) at alpha=0.05 give ~23% chance of at
+    least one false positive; Holm keeps the family-wise error at 5%.
+    """
+    out = pd.concat([segments(df, c) for c in cols], ignore_index=True)
+    reject, p_adj, _, _ = multipletests(out["p_value"], alpha=ALPHA, method="holm")
+    out["p_holm"] = p_adj
+    out["significant"] = reject
+    return out
+
+
+def lift_difference(df: pd.DataFrame, col: str, a: str, b: str) -> dict:
+    """Is the absolute lift in segment `a` different from segment `b`?
+
+    Comparing two separate p-values ("one is significant, other is not") is not
+    a test. Here: diff of lifts / its SE, a z-test on the interaction.
+    """
+    ra = two_prop(df[df[col] == a])
+    rb = two_prop(df[df[col] == b])
+
+    def _var(r: dict) -> float:
+        return (
+            r["p_control"] * (1 - r["p_control"]) / r["n_control"]
+            + r["p_treatment"] * (1 - r["p_treatment"]) / r["n_treatment"]
+        )
+
+    diff = ra["abs_lift"] - rb["abs_lift"]
+    se = math.sqrt(_var(ra) + _var(rb))
+    z = diff / se
+    zc = stats.norm.ppf(1 - ALPHA / 2)
+    return {
+        "a": a,
+        "b": b,
+        "lift_a": ra["abs_lift"],
+        "lift_b": rb["abs_lift"],
+        "diff": diff,
+        "ci": (diff - zc * se, diff + zc * se),
+        "p_value": float(2 * stats.norm.sf(abs(z))),
+    }
+
+
+def segment_rpu(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    rows = []
+    for key, part in df.groupby(col):
+        r = revenue_per_user(part)
+        r["value"] = key
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def cumulative_lift(df: pd.DataFrame) -> pd.DataFrame:
+    """Cumulative effect by assignment day: is the lift stable or a novelty spike?
+
+    p-value per day is shown only to illustrate peeking: the decision is made
+    once, on day 14, as planned.
+    """
+    d = df.assign(day=df["assigned_at"].dt.normalize())
+    rows = []
+    for day in sorted(d["day"].unique()):
+        r = two_prop(d[d["day"] <= day])
+        rows.append(
+            {
+                "day": day,
+                "rel_lift": r["rel_lift"],
+                "abs_lift": r["abs_lift"],
+                "ci_lo": r["ci_abs"][0],
+                "ci_hi": r["ci_abs"][1],
+                "p_value": r["p_value"],
+            }
+        )
     return pd.DataFrame(rows)
